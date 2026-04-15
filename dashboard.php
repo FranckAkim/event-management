@@ -57,10 +57,14 @@ $canManage = $isAdmin;  // only admin sees Reports, Attendees
             <section class="card" id="authCard">
                 <div class="hd">
                     <div>
-                        <h2>Logged In As</h2>
+                        <h2>Welcome</h2>
                         <p id="userName"><?= htmlspecialchars($_SESSION['user_name'] ?? 'User') ?></p>
                     </div>
-                    <span class="badge ok">DB Connected</span>
+                    <span class="badge ok" id="sidebarBadge">
+                        <?php if ($isAdmin): ?>DB Connected<?php
+                                                        elseif ($isOrg): ?>Loading...<?php
+                                                                                    else: ?>Loading...<?php endif; ?>
+                    </span>
                 </div>
                 <div class="bd">
                     <div class="stack">
