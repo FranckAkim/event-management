@@ -1847,9 +1847,33 @@ function renderMain() {
     getMain().innerHTML = `<div class="panel"><h3>${state.tab}</h3><p>Coming soon...</p></div>`;
 }
 
+// ==================== THEME TOGGLE ====================
+function initTheme() {
+    const saved = localStorage.getItem('ch-theme') || 'light';
+    applyTheme(saved, false);
+}
+
+function applyTheme(theme, animate = true) {
+    if (!animate) document.body.style.transition = 'none';
+    document.body.classList.toggle('dark', theme === 'dark');
+    if (!animate) setTimeout(() => document.body.style.transition = '', 50);
+
+    localStorage.setItem('ch-theme', theme);
+
+    const icon = document.getElementById('themeIcon');
+    if (icon) icon.textContent = theme === 'dark' ? '🌙' : '☀️';
+}
+
+function toggleTheme() {
+    const isDark = document.body.classList.contains('dark');
+    applyTheme(isDark ? 'light' : 'dark');
+}
+
 // ==================== INIT ====================
 function init() {
+    initTheme();
     setHeaderForRole();
+    document.getElementById("themeToggleBtn")?.addEventListener("click", toggleTheme);
     document.querySelectorAll(".tab").forEach(t => { t.addEventListener("click", () => setActiveTab(t.dataset.tab)); });
     document.querySelectorAll(".chip").forEach(chip => {
         chip.addEventListener("click", () => {
