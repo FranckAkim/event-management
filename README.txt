@@ -1,8 +1,23 @@
-# CelebrateHub — Event Scheduling System
 ### CINS 5305 | Full Project Documentation
 
 ---
 
+How to RUN our file
+1 - Download the zip file and unzip.
+2 - Copy the files into C:\xampp\htdocs\Celebratehub (create the file Celebratehub and copy the slides into it)
+3 - Open xammp and start the Apache and MySQL 
+4 - Open myphp local server on your laptop/pc
+5 - Create a new database called event_management
+5 - Import the sql file from the zip file after unzipping it in this "event_management" you just created.
+6 - Use VS code or any other application to run the codes.
+7 - Open the index.php file to go to the welcome page. you can create an account or use the user table from the database to login with any of the users.
+8 - Then explore base on your role as admin, organizer or attendee
+9 - Different dashboards are going to be available base on your role.
+10 - Enjoy
+
+
+ 
+# CelebrateHub — Event Scheduling System
 ## Table of Contents
 
 1. What Is This Project?
@@ -181,15 +196,10 @@ celebratehub/
 │   └── venue-utilization.php     ← Venue usage stats (kept for reference)
 │
 ├── assets/
-│   ├── css/
-│   │   └── styles.css            ← All visual styling
-│   └── js/
-│       └── script.js             ← All interactivity and dashboard logic
-│
-└── database/
-    ├── schema.sql                ← Creates all 8 tables with constraints
-    ├── test_data.sql             ← Sample data + 3 triggers
-    └── fix_resources.sql         ← Populates resource and event_resource tables
+    ├── css/
+    │   └── styles.css            ← All visual styling
+    └── js/
+         └── script.js             ← All interactivity and dashboard logic
 ```
 
 ---
