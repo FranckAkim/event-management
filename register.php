@@ -1,172 +1,118 @@
 <?php
-// register.php - Updated with branding + session name
 session_start();
-require_once 'config/db.php';
+if (isset($_SESSION['user_id'])) {
+    header("Location: dashboard.php");
+    exit;
+}
 
-$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+$error   = '';
+$success = '';
 
-$message = "";
-$success = false;
-$redirect = false;
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_once 'config/db.php';
 
-if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    $name     = trim($_POST['name'] ?? '');
-    $email    = trim($_POST['email'] ?? '');
-    $password = $_POST['password'] ?? '';
-    $confirm  = $_POST['confirm_password'] ?? '';
-    $role     = $_POST['role'] ?? 'Requester';
+    $name     = trim($_POST['name']     ?? '');
+    $email    = trim($_POST['email']    ?? '');
+    $password = trim($_POST['password'] ?? '');
+    $role     = 'requester'; // all self-registered users are attendees
 
     if (empty($name) || empty($email) || empty($password)) {
-        $message = "All fields are required.";
-    } elseif ($password !== $confirm) {
-        $message = "Passwords do not match.";
-    } elseif (strlen($password) < 4) {
-        $message = "Password must be at least 4 characters long.";
+        $error = 'Please fill in all fields.';
+    } elseif (strlen($password) < 6) {
+        $error = 'Password must be at least 6 characters.';
     } else {
-        try {
-            $stmt = $pdo->prepare("SELECT UserID FROM user WHERE Email = ?");
-            $stmt->execute([$email]);
-
-            if ($stmt->rowCount() > 0) {
-                $message = "This email is already registered.";
-            } else {
-                $stmt = $pdo->prepare("
-                    INSERT INTO user (Name, Email, RoleName, password) 
-                    VALUES (?, ?, ?, ?)
-                ");
-
-                if ($stmt->execute([$name, $email, $role, $password])) {
-                    $success = true;
-                    $redirect = true;
-                    $message = "✅ Account created successfully!<br>Redirecting to login...";
-                } else {
-                    $message = "Failed to create account.";
-                }
-            }
-        } catch (PDOException $e) {
-            $message = "Database error: " . htmlspecialchars($e->getMessage());
+        // Check if email already exists
+        $check = $pdo->prepare("SELECT UserID FROM user WHERE Email = ? LIMIT 1");
+        $check->execute([$email]);
+        if ($check->fetch()) {
+            $error = 'That email address is already registered. Please sign in instead.';
+        } else {
+            $pdo->prepare("INSERT INTO user (Name, Email, RoleName, password) VALUES (?, ?, ?, ?)")
+                ->execute([$name, $email, $role, $password]);
+            $success = 'Account created! You can now sign in.';
         }
     }
 }
 ?>
-
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Event Scheduling System - Create Account</title>
+    <title>CelebrateHub — Create Account</title>
     <link rel="stylesheet" href="assets/css/styles.css" />
-    <style>
-        body {
-            background: var(--bg);
-            color: var(--text);
-            font-family: var(--font);
-            margin: 0;
-            padding: 0;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        .register-box {
-            max-width: 440px;
-            margin: 80px auto;
-            background: var(--panel);
-            padding: 40px;
-            border-radius: var(--radius2);
-            box-shadow: var(--shadow);
-        }
-
-        .btn {
-            width: 100%;
-            padding: 14px;
-            margin-top: 15px;
-            font-size: 16px;
-        }
-
-        .field {
-            margin-bottom: 20px;
-        }
-
-        .field label {
-            display: block;
-            margin-bottom: 8px;
-            color: var(--muted);
-        }
-
-        input,
-        select {
-            width: 100%;
-            padding: 12px 14px;
-            background: var(--panel2);
-            border: 1px solid var(--line);
-            border-radius: 8px;
-            color: var(--text);
-            font-size: 15px;
-        }
-    </style>
-    <?php if ($redirect): ?>
-        <script>
-            setTimeout(function() {
-                window.location.href = "login.php";
-            }, 2000);
-        </script>
-    <?php endif; ?>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <script>
+        (function() {
+            if (localStorage.getItem('ch-theme') === 'dark') {
+                document.body && document.body.classList.add('dark');
+            }
+            document.addEventListener('DOMContentLoaded', function() {
+                if (localStorage.getItem('ch-theme') === 'dark') {
+                    document.body.classList.add('dark');
+                }
+            });
+        })();
+    </script>
 </head>
 
 <body>
-    <div class="register-box">
-        <div style="text-align:center; margin-bottom:30px;">
-            <h1>Event Scheduling System</h1>
-            <p style="color:var(--muted);">Create New Account</p>
-        </div>
+    <div class="auth-wrap">
+        <div class="auth-card">
 
-        <?php if ($message): ?>
-            <div style="padding:14px; margin-bottom:20px; border-radius:8px; 
-                        background:<?= $success ? '#34d39930' : '#fb718530' ?>; 
-                        color:<?= $success ? '#34d399' : '#fb7185' ?>; text-align:center;">
-                <?= $message ?>
+            <div style="text-align:center;margin-bottom:16px;">
+                <img src="assets/images/logo.svg" alt="CelebrateHub" width="54" height="54"
+                    style="border-radius:50%;box-shadow:0 6px 20px rgba(255,107,157,.32);" />
             </div>
-        <?php endif; ?>
+            <div class="auth-logo">
+                Celebrate<span>Hub</span>
+            </div>
+            <p class="auth-sub">Create your account to get started</p>
 
-        <?php if (!$success): ?>
-            <form method="POST" action="">
+            <?php if ($error): ?>
+                <div class="auth-error show"><?= htmlspecialchars($error) ?></div>
+            <?php endif; ?>
+
+            <?php if ($success): ?>
+                <div style="background:rgba(92,230,200,.14);border:1px solid rgba(92,230,200,.35);
+                    border-radius:8px;color:#1a9e86;font-size:.82rem;
+                    padding:10px 14px;margin-bottom:14px;">
+                    ✅ <?= htmlspecialchars($success) ?>
+                    <a href="login.php" style="color:var(--rose);font-weight:600;margin-left:6px;">Sign In →</a>
+                </div>
+            <?php endif; ?>
+
+            <form method="POST" action="register.php">
                 <div class="field">
                     <label>Full Name</label>
-                    <input type="text" name="name" required value="<?= htmlspecialchars($_POST['name'] ?? '') ?>" />
+                    <input type="text" name="name" placeholder="Alice Johnson"
+                        value="<?= htmlspecialchars($_POST['name'] ?? '') ?>"
+                        autocomplete="name" required />
                 </div>
-                <div class="field">
+                <div class="field" style="margin-top:12px;">
                     <label>Email Address</label>
-                    <input type="email" name="email" required value="<?= htmlspecialchars($_POST['email'] ?? '') ?>" />
+                    <input type="email" name="email" placeholder="alice@example.com"
+                        value="<?= htmlspecialchars($_POST['email'] ?? '') ?>"
+                        autocomplete="email" required />
                 </div>
-                <div class="field">
+                <div class="field" style="margin-top:12px;">
                     <label>Password</label>
-                    <input type="password" name="password" required />
+                    <input type="password" name="password" placeholder="Min. 6 characters"
+                        autocomplete="new-password" required />
                 </div>
-                <div class="field">
-                    <label>Confirm Password</label>
-                    <input type="password" name="confirm_password" required />
-                </div>
-                <div class="field">
-                    <label>Account Type</label>
-                    <select name="role" required>
-                        <option value="Requester">Attendee / Requester</option>
-                        <option value="Organiser">Organizer</option>
-                    </select>
-                </div>
-                <button type="submit" class="btn primary">Create My Account</button>
+                <button type="submit" class="btn primary" style="margin-top:20px;width:100%;border-radius:12px;padding:12px;">
+                    Create Account
+                </button>
             </form>
-        <?php endif; ?>
 
-        <?php if (!$success): ?>
-            <p style="text-align:center; margin-top:25px; color:var(--muted);">
+            <div class="auth-footer">
                 Already have an account?
-                <a href="login.php" style="color:var(--accent);">Login here</a>
-            </p>
-        <?php endif; ?>
+                <a href="login.php">Sign in</a>
+            </div>
+
+        </div>
     </div>
 </body>
 
