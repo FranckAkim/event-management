@@ -13,7 +13,7 @@ const el = (id) => document.getElementById(id);
 const rolePill     = el("rolePill");
 const viewTitle    = el("viewTitle");
 const viewSubtitle = el("viewSubtitle");
-const mainContent  = el("mainContent");
+const getMain = () => document.getElementById("mainContent");
 const toast        = el("toast");
 const toastTitle   = el("toastTitle");
 const toastMsg     = el("toastMsg");
@@ -73,17 +73,35 @@ async function fetchJSON(url, options = {}) {
 
 // ==================== CONFLICT DETECTION ====================
 function getConflictingEventIDs(events) {
+    // Deduplicate by EventID first — same event appearing twice is NOT a conflict
+    const seen = new Set();
+    const unique = events.filter(ev => {
+        if (seen.has(ev.EventID)) return false;
+        seen.add(ev.EventID);
+        return true;
+    });
+
     const conflictIDs = new Set();
-    for (let i = 0; i < events.length; i++) {
-        for (let j = i + 1; j < events.length; j++) {
-            const a = events[i], b = events[j];
+    for (let i = 0; i < unique.length; i++) {
+        for (let j = i + 1; j < unique.length; j++) {
+            const a = unique[i], b = unique[j];
+
+            // Must be different events at the same venue on the same date
+            if (a.EventID  === b.EventID)  continue;
             if (String(a.VenueID) !== String(b.VenueID)) continue;
+            if (!a.VenueID || !b.VenueID)  continue;
             if (a.EventDate !== b.EventDate) continue;
+            if (!a.EventDate || !b.EventDate) continue;
+
             const aParts = (a.TimeSlot || "").split("–");
             const bParts = (b.TimeSlot || "").split("–");
             if (aParts.length < 2 || bParts.length < 2) continue;
-            const aStart = aParts[0].trim().substring(0, 5), aEnd = aParts[1].trim().substring(0, 5);
-            const bStart = bParts[0].trim().substring(0, 5), bEnd = bParts[1].trim().substring(0, 5);
+
+            const aStart = aParts[0].trim().substring(0, 5);
+            const aEnd   = aParts[1].trim().substring(0, 5);
+            const bStart = bParts[0].trim().substring(0, 5);
+            const bEnd   = bParts[1].trim().substring(0, 5);
+
             if (aStart < bEnd && aEnd > bStart) {
                 conflictIDs.add(String(a.EventID));
                 conflictIDs.add(String(b.EventID));
@@ -93,22 +111,341 @@ function getConflictingEventIDs(events) {
     return conflictIDs;
 }
 
+// ==================== SIDEBAR BADGE ====================
+function updateSidebarBadge(kpi) {
+    const badge = document.getElementById("sidebarBadge");
+    if (!badge) return;
+
+    if (kpi.role === "organiser") {
+        const count = kpi.activeEvents || 0;
+        badge.textContent = count === 1 ? "1 Event Active" : `${count} Events Active`;
+        badge.className   = "badge";
+        badge.style.background  = "rgba(78,205,196,0.18)";
+        badge.style.color       = "#4ecdc4";
+        badge.style.border      = "1px solid rgba(78,205,196,0.4)";
+    } else if (kpi.role === "requester") {
+        const count = kpi.openDays || 0;   // openDays = My Upcoming Events for requester
+        badge.textContent = count === 1 ? "1 Upcoming" : `${count} Upcoming`;
+        badge.className   = "badge";
+        badge.style.background  = "rgba(100,200,255,0.15)";
+        badge.style.color       = "#64c8ff";
+        badge.style.border      = "1px solid rgba(100,200,255,0.35)";
+    }
+    // Admin keeps DB Connected — set by PHP, no JS update needed
+}
+
+// ==================== PENDING REQUESTS (organiser dashboard) ====================
+async function loadPendingRequestsPanel() {
+    const panel = document.getElementById("pendingRequestsPanel");
+    if (!panel) return;
+
+    // Fetch only PENDING bookings for this organiser's events
+    const data = await fetchJSON("api/attendees.php?status=PENDING");
+    if (!data.success) {
+        panel.innerHTML = `<div style="color:#fb7185;font-size:13px;padding:8px 0;">Failed to load requests.</div>`;
+        return;
+    }
+
+    const pending = (data.bookings || []).filter(b => b.BookingStatus === "PENDING");
+
+    if (pending.length === 0) {
+        panel.innerHTML = `<div style="color:var(--muted);font-size:13px;padding:12px 0;text-align:center;">
+            ✅ No pending requests — all caught up!
+        </div>`;
+        return;
+    }
+
+    panel.innerHTML = pending.map(b => `
+        <div style="
+            display:flex;align-items:center;justify-content:space-between;
+            padding:10px 0;border-bottom:1px solid var(--glass-border);
+            gap:12px;flex-wrap:wrap;
+        ">
+            <div style="flex:1;min-width:0;">
+                <div style="font-size:13px;font-weight:500;">${b.AttendeeName || "—"}</div>
+                <div style="font-size:11.5px;color:var(--muted);margin-top:2px;">
+                    ${b.EventName || "—"}
+                    ${b.EventDate ? `· ${b.EventDate}` : ""}
+                </div>
+            </div>
+            <div style="display:flex;gap:8px;flex-shrink:0;">
+                <button class="btn small primary"
+                    onclick="updateBookingStatus(${b.BookingID}, 'APPROVED', this)"
+                    style="font-size:11.5px;padding:5px 14px;">
+                    ✅ Approve
+                </button>
+                <button class="btn small danger"
+                    onclick="updateBookingStatus(${b.BookingID}, 'REJECTED', this)"
+                    style="font-size:11.5px;padding:5px 14px;">
+                    ❌ Decline
+                </button>
+            </div>
+        </div>
+    `).join("");
+}
+
+window.updateBookingStatus = async function(bookingID, status, btn) {
+    // Disable both buttons immediately to prevent double-click
+    const row = btn.closest("div[style*='border-bottom']");
+    if (row) row.querySelectorAll("button").forEach(b => b.disabled = true);
+
+    const result = await fetchJSON("api/update-booking.php", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ bookingID, status })
+    });
+
+    if (result.success) {
+        showToast(status === "APPROVED" ? "Approved ✅" : "Declined ❌", result.message);
+
+        // Fade the processed row out visually
+        if (row) row.style.opacity = "0.3";
+
+        setTimeout(() => {
+            // 1. Refresh the organiser's own panels
+            loadPendingRequestsPanel();
+            loadGuestListPanel();
+
+            // 2. Refresh the KPI tiles and event capacity counts
+            //    so both organiser and admin see correct numbers
+            Promise.all([
+                fetchJSON("api/events-list.php"),
+                fetchJSON("api/kpi-stats.php")
+            ]).then(([eventsData, kpiData]) => {
+                // Update the cached event list used by dashboard + filters
+                if (eventsData.success && eventsData.events) {
+                    dashboardEvents = eventsData.events;
+                    allEventsCache  = eventsData.events;
+                }
+
+                // If admin is currently on the Attendees tab, refresh it live
+                if (state.tab === "attendees") {
+                    renderAttendeesTab(
+                        el("attSearch")?.value.trim()  || "",
+                        el("attEventSel")?.value       || "",
+                        el("attStatus")?.value         || ""
+                    );
+                }
+
+                // If admin is on the Events tab, refresh the event list
+                if (state.tab === "events") {
+                    renderEventsTab(dashboardEvents);
+                }
+            });
+
+        }, 600);
+
+    } else {
+        showToast("Error", result.error || "Could not update booking.");
+        if (row) row.querySelectorAll("button").forEach(b => b.disabled = false);
+    }
+};
+
+// ==================== GUEST LIST (organiser dashboard) ====================
+async function loadGuestListPanel() {
+    const panel = document.getElementById("guestListPanel");
+    if (!panel) return;
+
+    const data = await fetchJSON("api/attendees.php");
+    if (!data.success || !data.bookings || data.bookings.length === 0) {
+        panel.innerHTML = `<div style="color:var(--muted);font-size:13px;padding:12px 0;text-align:center;">
+            No registrations yet for your events.
+        </div>`;
+        return;
+    }
+
+    // Group bookings by event name, preserving insertion order
+    const grouped = {};
+    data.bookings.forEach(b => {
+        const key = b.EventName || "Unknown Event";
+        if (!grouped[key]) grouped[key] = [];
+        grouped[key].push(b);
+    });
+
+    panel.innerHTML = Object.entries(grouped).map(([eventName, guests]) => {
+        const approved = guests.filter(g => g.BookingStatus === "APPROVED").length;
+        const pending  = guests.filter(g => g.BookingStatus === "PENDING").length;
+        const total    = guests.length;
+
+        // Guest rows — name, status, and remove button
+        const rows = guests.map((g, i) => {
+            const cls     = g.BookingStatus === "APPROVED" ? "ok"
+                          : g.BookingStatus === "PENDING"  ? "warn"
+                          : "danger";
+            const isLast  = i === guests.length - 1;
+            const canRemove = g.BookingStatus !== "CANCELLED" && g.BookingStatus !== "REJECTED";
+            return `<div data-booking-row="${g.BookingID}" style="
+                display:flex;
+                align-items:center;
+                justify-content:space-between;
+                padding:7px 10px;
+                gap:8px;
+                ${!isLast ? "border-bottom:1px solid var(--glass-border);" : ""}
+                font-size:12.5px;
+                transition:opacity .3s;
+            ">
+                <span style="color:var(--white);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                    ${g.AttendeeName || "—"}
+                </span>
+                <span class="badge ${cls}" style="font-size:11px;padding:3px 8px;flex-shrink:0;">
+                    ${g.BookingStatus}
+                </span>
+                ${canRemove ? `
+                <button
+                    onclick="removeGuest(${g.BookingID}, '${(g.AttendeeName || '').replace(/'/g,'')}')"
+                    title="Remove ${g.AttendeeName} from this event"
+                    style="
+                        flex-shrink:0;
+                        background:transparent;
+                        border:1px solid rgba(251,113,133,0.4);
+                        color:#fb7185;
+                        border-radius:6px;
+                        padding:3px 8px;
+                        font-size:11px;
+                        cursor:pointer;
+                        transition:background .15s,color .15s;
+                    "
+                    onmouseover="this.style.background='rgba(251,113,133,0.15)'"
+                    onmouseout="this.style.background='transparent'"
+                >✕ Remove</button>` : `<span style="width:60px;display:inline-block;"></span>`}
+            </div>`;
+        }).join("");
+
+        return `<div style="margin-bottom:14px;border-radius:12px;overflow:hidden;border:1px solid var(--glass-border);">
+            <!-- Event header -->
+            <div style="
+                background:var(--glass);
+                padding:8px 10px;
+                display:flex;
+                align-items:center;
+                justify-content:space-between;
+                border-bottom:1px solid var(--glass-border);
+            ">
+                <b style="font-size:12.5px;color:var(--white);">${eventName}</b>
+                <span style="font-size:11px;color:var(--muted);">${total} guest${total !== 1 ? "s" : ""} &nbsp;·&nbsp; ✅${approved} ⏳${pending}</span>
+            </div>
+            <!-- Guest rows -->
+            ${rows}
+        </div>`;
+    }).join("");
+}
+
+// Remove a guest from an event (sets booking to CANCELLED)
+window.removeGuest = async function(bookingID, guestName) {
+    if (!confirm(`Remove ${guestName} from this event? Their registration will be cancelled.`)) return;
+
+    // Visually fade the row immediately
+    const row = document.querySelector(`[data-booking-row="${bookingID}"]`);
+    if (row) {
+        row.style.opacity = "0.3";
+        row.querySelectorAll("button").forEach(b => b.disabled = true);
+    }
+
+    const result = await fetchJSON("api/remove-guest.php", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ bookingID })
+    });
+
+    if (result.success) {
+        showToast("Removed", `${guestName} has been removed from the event.`);
+        // Refresh panels and event data
+        setTimeout(() => {
+            loadGuestListPanel();
+            loadPendingRequestsPanel();
+            // Refresh event capacity counts
+            Promise.all([
+                fetchJSON("api/events-list.php"),
+                fetchJSON("api/kpi-stats.php")
+            ]).then(([eventsData, kpiData]) => {
+                if (eventsData.success && eventsData.events) {
+                    dashboardEvents = eventsData.events;
+                    allEventsCache  = eventsData.events;
+                }
+                if (state.tab === "attendees") {
+                    renderAttendeesTab(
+                        el("attSearch")?.value.trim() || "",
+                        el("attEventSel")?.value      || "",
+                        el("attStatus")?.value         || ""
+                    );
+                }
+                if (state.tab === "events") {
+                    renderEventsTab(dashboardEvents);
+                }
+            });
+        }, 400);
+    } else {
+        showToast("Error", result.error || "Could not remove guest.");
+        if (row) {
+            row.style.opacity = "1";
+            row.querySelectorAll("button").forEach(b => b.disabled = false);
+        }
+    }
+};
+
 // ==================== DASHBOARD ====================
 async function loadDashboardData() {
-    const [eventsData, kpiData] = await Promise.all([
-        fetchJSON("api/events-list.php"),
-        fetchJSON("api/kpi-stats.php")
-    ]);
-    dashboardEvents = (eventsData.success && eventsData.events) ? eventsData.events : [];
-    renderDashboard(dashboardEvents, kpiData);
+    const mc = getMain();
+    if (mc) mc.innerHTML = `<div style="text-align:center;padding:60px;color:var(--muted);">
+        <div style="font-size:2rem;margin-bottom:12px;">⏳</div>
+        <div>Loading dashboard...</div>
+    </div>`;
+
+    try {
+        const [eventsData, kpiData] = await Promise.all([
+            fetchJSON("api/events-list.php"),
+            fetchJSON("api/kpi-stats.php")
+        ]);
+
+        if (!eventsData.success) {
+            const mc2 = getMain();
+            if (mc2) mc2.innerHTML = `<div style="text-align:center;padding:60px;color:#fb7185;">
+                <div style="font-size:2rem;margin-bottom:12px;">⚠️</div>
+                <div>Dashboard failed to load.</div>
+                <div style="font-size:12px;margin-top:8px;color:var(--muted)">${eventsData.error || "Check that your PHP session is active and APIs are reachable."}</div>
+            </div>`;
+            return;
+        }
+
+        dashboardEvents = eventsData.events || [];
+        renderDashboard(dashboardEvents, kpiData);
+
+        // Update sidebar badge with live role-relevant info
+        updateSidebarBadge(kpiData);
+
+        // Load role-specific panels after dashboard renders
+        if (kpiData.role === "organiser") {
+            loadPendingRequestsPanel();
+            loadGuestListPanel();
+        } else if (kpiData.role === "admin") {
+            loadEventHealth();
+        }
+
+    } catch (err) {
+        const mc2 = getMain();
+        if (mc2) mc2.innerHTML = `<div style="text-align:center;padding:60px;color:#fb7185;">
+            <div style="font-size:2rem;margin-bottom:12px;">⚠️</div>
+            <div>Dashboard error: ${err.message}</div>
+        </div>`;
+    }
 }
 
 function renderDashboard(events, kpi = {}) {
     const today          = new Date().toISOString().split("T")[0];
     const conflictIDs    = getConflictingEventIDs(events);
     const nearCapacity   = events.filter(ev => ev.Capacity > 0 && (ev.Registered / ev.Capacity) >= 0.85);
-    const todayEvents    = events.filter(ev => ev.EventDate === today);
-    const upcomingEvents = events.filter(ev => ev.EventDate >= today).slice(0, 7);
+
+    // Deduplicate by EventID before filtering (safety net for any leftover DB duplicates)
+    const seenIDs     = new Set();
+    const uniqueEvents = events.filter(ev => {
+        if (seenIDs.has(ev.EventID)) return false;
+        seenIDs.add(ev.EventID);
+        return true;
+    });
+
+    // Today: only CONFIRMED events, deduplicated
+    const todayEvents    = uniqueEvents.filter(ev => ev.EventDate === today && ev.Status === "CONFIRMED");
+    const upcomingEvents = uniqueEvents.filter(ev => ev.EventDate >= today).slice(0, 7);
 
     // KPI values — use API numbers if available, fallback to client-side counts
     const kpiActive   = kpi.success ? kpi.activeEvents    : events.length;
@@ -135,7 +472,7 @@ function renderDashboard(events, kpi = {}) {
                : kpi.role === "requester" ? "Days free this week"
                : "Pending approvals";
 
-    mainContent.innerHTML = `
+    getMain().innerHTML = `
         <div class="kpi-grid" id="kpiRow">
             <div class="kpi-card">
                 <h3>${label1}</h3>
@@ -159,13 +496,24 @@ function renderDashboard(events, kpi = {}) {
             </div>
         </div>
 
+        ${kpi.role === "organiser" ? `
+        <div class="panel-card" style="margin-bottom:24px;">
+            <h3>📋 Pending Approval Requests</h3>
+            <p>Attendees waiting for your approval to join your events.</p>
+            <div class="divider"></div>
+            <div id="pendingRequestsPanel">
+                <div style="color:var(--muted);font-size:13px;padding:12px 0;text-align:center;">Loading requests...</div>
+            </div>
+        </div>
+        ` : ""}
+
         <div class="two-col">
             <div class="panel-card">
-                <h3>${kpi.role === "requester" ? "Your Events Today" : "Today's Key Items"}</h3>
+                <h3>${kpi.role === "requester" ? "Your Events Today" : kpi.role === "organiser" ? "📝 To-Do List" : "Today's Confirmed Events"}</h3>
                 <p>${today}</p>
                 <div class="divider"></div>
                 <table class="table">
-                    <thead><tr><th>Event</th><th>Venue</th><th>Time</th><th>Status</th></tr></thead>
+                    <thead><tr><th>Event</th><th>Venue</th><th>Time</th><th>Capacity</th></tr></thead>
                     <tbody>
                         ${todayEvents.length === 0
                             ? `<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:16px;">
@@ -173,18 +521,17 @@ function renderDashboard(events, kpi = {}) {
                                     ? "You have no events today."
                                     : kpi.role === "organiser"
                                     ? "You have no events scheduled for today."
-                                    : "No events today."}
+                                    : "No confirmed events today."}
                                </td></tr>`
                             : todayEvents.map(ev => {
-                                const isConflict = conflictIDs.has(String(ev.EventID));
-                                const pct = ev.Capacity > 0 ? (ev.Registered / ev.Capacity) * 100 : 0;
-                                const cls = isConflict ? "danger" : pct >= 85 ? "warn" : "ok";
-                                const lbl = isConflict ? "Conflict" : pct >= 85 ? "Near capacity" : "OK";
+                                const pct  = ev.Capacity > 0 ? Math.round((ev.Registered / ev.Capacity) * 100) : 0;
+                                const cls  = pct >= 95 ? "danger" : pct >= 85 ? "warn" : "ok";
+                                const lbl  = pct >= 95 ? "Full" : pct >= 85 ? "Near capacity" : "Confirmed";
                                 return `<tr>
                                     <td><b>${ev.EventName || "Untitled"}</b></td>
                                     <td>${ev.VenueName || "—"}</td>
                                     <td>${ev.TimeSlot  || "—"}</td>
-                                    <td><span class="badge ${cls}">${lbl}</span></td>
+                                    <td><span class="badge ${cls}">${lbl} (${ev.Registered}/${ev.Capacity})</span></td>
                                 </tr>`;
                               }).join("")
                         }
@@ -210,33 +557,29 @@ function renderDashboard(events, kpi = {}) {
                             Browse All Events
                         </button>
                     </div>
-                ` : `
-                    <h3>${kpi.role === "organiser" ? "My Event Health" : "Conflict Prevention"}</h3>
-                    <p>${kpi.role === "organiser" ? "Status of events you are organising." : "Live scan across all scheduled events."}</p>
+                ` : kpi.role === "organiser" ? `
+                    <h3>👥 Guest List</h3>
+                    <p>Attendees registered across your events.</p>
                     <div class="divider"></div>
-                    <div>
-                        ${conflictIDs.size === 0 && nearCapacity.length === 0
-                            ? `<div style="color:var(--muted);font-size:14px;padding:8px 0;">✅ No issues detected.</div>` : ""}
-                        ${nearCapacity.slice(0, 3).map(ev => {
-                            const pct = Math.round((ev.Registered / ev.Capacity) * 100);
-                            return `<div style="margin-bottom:10px;">
-                                <span class="badge warn">Near capacity</span>
-                                <div class="hint" style="margin-top:4px;">"${ev.EventName}" is ${pct}% full (${ev.Registered}/${ev.Capacity}).</div>
-                            </div>`;
-                        }).join("")}
-                        ${conflictIDs.size > 0
-                            ? events.filter(ev => conflictIDs.has(String(ev.EventID))).slice(0, 2).map(ev => `
-                                <div style="margin-bottom:10px;">
-                                    <span class="badge danger">Venue overlap</span>
-                                    <div class="hint" style="margin-top:4px;">"${ev.EventName}" — ${ev.VenueName} on ${ev.EventDate}.</div>
-                                </div>`).join("") : ""
-                        }
+                    <div id="guestListPanel" style="max-height:320px;overflow-y:auto;margin-top:4px;">
+                        <div style="color:var(--muted);font-size:13px;padding:12px 0;text-align:center;">Loading guests...</div>
                     </div>
                     <div class="divider"></div>
-                    <button class="btn primary" style="width:100%;" onclick="runSchedulingCheck()">
-                        Run Scheduling Check
+                    <button class="btn" style="width:100%;margin-top:4px;" onclick="setActiveTab('attendees')">
+                        View Full Attendees Tab
                     </button>
-                `}
+                ` : kpi.role === "admin" ? `
+                    <h3>📊 Event Health Overview</h3>
+                    <p>A snapshot of how all confirmed events are performing.</p>
+                    <div class="divider"></div>
+                    <div id="eventHealthPanel" style="max-height:320px;overflow-y:auto;">
+                        <div style="color:var(--muted);font-size:13px;padding:12px 0;text-align:center;">Loading...</div>
+                    </div>
+                    <div class="divider"></div>
+                    <button class="btn" style="width:100%;" onclick="setActiveTab('events')">
+                        View All Events
+                    </button>
+                ` : ``}
             </div>
         </div>
 
@@ -247,10 +590,9 @@ function renderDashboard(events, kpi = {}) {
                 ${upcomingEvents.length === 0
                     ? `<div style="color:var(--muted);padding:16px;">No upcoming events.</div>`
                     : upcomingEvents.map(ev => {
-                        const isConflict = conflictIDs.has(String(ev.EventID));
-                        const pct = ev.Capacity > 0 ? (ev.Registered / ev.Capacity) * 100 : 0;
+                        const pct    = ev.Capacity > 0 ? (ev.Registered / ev.Capacity) * 100 : 0;
                         const isNear = pct >= 85;
-                        const bg = isConflict ? "#fb718533" : isNear ? "#fbbf2433" : "#4ade8033";
+                        const bg     = isNear ? "#fbbf2433" : "#4ade8033";
                         const dateObj  = new Date(ev.EventDate + "T00:00:00");
                         const dayName  = dateObj.toLocaleDateString("en-US", { weekday: "short" });
                         const dateDisp = dateObj.toLocaleDateString("en-US", { month: "short", day: "numeric" });
@@ -262,9 +604,8 @@ function renderDashboard(events, kpi = {}) {
                                 <small>${ev.VenueName || "—"}</small><br>
                                 <small>${ev.TimeSlot || ""}</small>
                             </div>
-                            ${isConflict ? `<span class="badge danger" style="font-size:10px;">Conflict</span>`
-                              : isNear   ? `<span class="badge warn" style="font-size:10px;">${Math.round(pct)}% full</span>`
-                              :            `<span class="badge ok" style="font-size:10px;">OK</span>`}
+                            ${isNear ? `<span class="badge warn" style="font-size:10px;">${Math.round(pct)}% full</span>`
+                                     : `<span class="badge ok" style="font-size:10px;">OK</span>`}
                         </div>`;
                     }).join("")
                 }
@@ -272,23 +613,86 @@ function renderDashboard(events, kpi = {}) {
         </div>`;
 }
 
-function runSchedulingCheck() {
-    const conflictIDs  = getConflictingEventIDs(dashboardEvents);
-    const nearCapacity = dashboardEvents.filter(ev => ev.Capacity > 0 && (ev.Registered / ev.Capacity) >= 0.85);
-    const issues = [];
-    if (conflictIDs.size > 0) {
-        const n = Math.floor(conflictIDs.size / 2);
-        issues.push(`⚠️ ${n} venue overlap${n > 1 ? "s" : ""} detected.`);
-    }
-    if (nearCapacity.length > 0) {
-        issues.push(`⚠️ ${nearCapacity.length} event${nearCapacity.length > 1 ? "s" : ""} above 85% capacity.`);
-    }
-    if (issues.length === 0) showToast("✅ All Clear", "No conflicts or capacity issues found.");
-    else showToast("Issues Found", issues.join(" "));
-}
+async function loadEventHealth() {
+    const panel = document.getElementById("eventHealthPanel");
+    if (!panel) return;
 
-window.runSchedulingCheck = runSchedulingCheck;
-window.simulateCheck      = runSchedulingCheck;
+    const data = await fetchJSON("api/event-health.php");
+    if (!data.success) {
+        panel.innerHTML = `<div style="color:#fb7185;font-size:13px;padding:12px 0;text-align:center;">Failed to load event health data.</div>`;
+        return;
+    }
+
+    // ── Summary stat tiles ───────────────────────────────────────
+    const avgColor = data.avgFill >= 85 ? "#fb7185"
+                   : data.avgFill >= 50 ? "#fbbf24"
+                   : "#4ade80";
+
+    const tiles = `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px;">
+            <div style="background:var(--glass);border-radius:10px;padding:10px;text-align:center;">
+                <div style="font-size:22px;font-weight:700;color:#4ade80;">${data.totalConfirmed}</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:2px;">Confirmed Events</div>
+            </div>
+            <div style="background:var(--glass);border-radius:10px;padding:10px;text-align:center;">
+                <div style="font-size:22px;font-weight:700;color:#38bdf8;">${data.thisMonth}</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:2px;">This Month</div>
+            </div>
+            <div style="background:var(--glass);border-radius:10px;padding:10px;text-align:center;">
+                <div style="font-size:22px;font-weight:700;color:#fbbf24;">${data.nearCapacityCount}</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:2px;">Near Capacity</div>
+            </div>
+            <div style="background:var(--glass);border-radius:10px;padding:10px;text-align:center;">
+                <div style="font-size:22px;font-weight:700;color:${avgColor};">${data.avgFill}%</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:2px;">Avg Fill Rate</div>
+            </div>
+        </div>`;
+
+    // ── Most popular event ───────────────────────────────────────
+    const popularSection = data.mostPopular ? `
+        <div style="border-top:1px solid var(--glass-border);padding-top:10px;margin-bottom:10px;">
+            <div style="font-size:11px;color:var(--muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px;">🏆 Most Popular</div>
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+                <span style="font-size:13px;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                    ${data.mostPopular.EventName}
+                </span>
+                <span class="badge ${data.mostPopular.FillPct >= 95 ? "danger" : "warn"}" style="font-size:11px;flex-shrink:0;margin-left:8px;">
+                    ${data.mostPopular.FillPct}% full
+                </span>
+            </div>
+            <div style="background:var(--glass);border-radius:4px;height:5px;margin-top:6px;overflow:hidden;">
+                <div style="width:${Math.min(data.mostPopular.FillPct, 100)}%;height:100%;background:#fbbf24;border-radius:4px;"></div>
+            </div>
+            <div style="font-size:11px;color:var(--muted);margin-top:3px;">${data.mostPopular.Registered} / ${data.mostPopular.Capacity} registered</div>
+        </div>` : "";
+
+    // ── Near capacity list ───────────────────────────────────────
+    const nearSection = data.nearCapacity.length > 0 ? `
+        <div style="border-top:1px solid var(--glass-border);padding-top:10px;margin-bottom:10px;">
+            <div style="font-size:11px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px;">⚠️ Near Capacity (${data.nearCapacityCount})</div>
+            ${data.nearCapacity.slice(0, 3).map(ev => `
+                <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--glass-border);">
+                    <span style="font-size:12.5px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${ev.EventName}</span>
+                    <span class="badge danger" style="font-size:10.5px;flex-shrink:0;margin-left:8px;">${ev.FillPct}%</span>
+                </div>`).join("")}
+        </div>` : "";
+
+    // ── Empty events list ────────────────────────────────────────
+    const emptySection = data.emptyCount > 0 ? `
+        <div style="border-top:1px solid var(--glass-border);padding-top:10px;">
+            <div style="font-size:11px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px;">📭 No Registrations Yet (${data.emptyCount})</div>
+            ${data.emptyEvents.slice(0, 3).map(ev => `
+                <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--glass-border);">
+                    <span style="font-size:12.5px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${ev.EventName}</span>
+                    <span style="font-size:11px;color:var(--muted);flex-shrink:0;margin-left:8px;">${ev.EventDate}</span>
+                </div>`).join("")}
+        </div>` : `
+        <div style="border-top:1px solid var(--glass-border);padding-top:10px;">
+            <div style="font-size:13px;color:#4ade80;text-align:center;padding:6px 0;">✅ All events have registrations</div>
+        </div>`;
+
+    panel.innerHTML = tiles + popularSection + nearSection + emptySection;
+}
 
 // ==================== TIPS MODAL ====================
 function showTipsModal() {
@@ -367,8 +771,11 @@ function buildEventRow(ev, canCreate = window.canCreateEvent) {
     const actionCol      = canCreate
         ? `<td><button class="btn small" onclick='editEvent(${ev.EventID}, ${evJson})'>Edit</button></td>`
         : "";
+    const privacyTag = ev.IsPrivate == 1
+        ? ` <span title="Private — invite only" style="font-size:11px;vertical-align:middle;">🔒</span>`
+        : "";
     return `<tr>
-        <td><b>${ev.EventName || "Untitled"}</b>${ev.Organizer ? `<br><small style="color:var(--muted)">${ev.Organizer}</small>` : ""}</td>
+        <td><b>${ev.EventName || "Untitled"}</b>${privacyTag}${ev.Organizer ? `<br><small style="color:var(--muted)">${ev.Organizer}</small>` : ""}</td>
         <td>${ev.VenueName || "—"}</td>
         <td>${dateTime    || "—"}</td>
         <td><span class="badge ${capacityStatus}">${registered} / ${capacity}${pct}</span></td>
@@ -520,7 +927,7 @@ window.deleteEvent = deleteEvent;
 async function loadEventsTab() {
     const data = await fetchJSON("api/events-list.php");
     if (data.success && data.events) { allEventsCache = data.events; renderEventsTab(data.events); }
-    else mainContent.innerHTML = `<div class="panel"><h3>Events</h3><p style="color:#fb7185;">Unable to load events. ${data.error || ""}</p></div>`;
+    else getMain().innerHTML = `<div class="panel"><h3>Events</h3><p style="color:#fb7185;">Unable to load events. ${data.error || ""}</p></div>`;
 }
 
 function renderEventsTab(events) {
@@ -532,7 +939,7 @@ function renderEventsTab(events) {
         const upcoming  = events.filter(ev => (ev.RegistrationStatus || "").toUpperCase() === "APPROVED");
         const available = events.filter(ev => (ev.RegistrationStatus || "").toUpperCase() !== "APPROVED");
 
-        mainContent.innerHTML = `
+        getMain().innerHTML = `
             <!-- Upcoming Events: approved registrations with Cancel button -->
             <div class="panel" style="margin-bottom:24px;">
                 <h3>📅 My Upcoming Events</h3>
@@ -582,7 +989,7 @@ function renderEventsTab(events) {
     }
 
     // ── ADMIN / ORGANISER: single list with Edit button ────────────────────
-    mainContent.innerHTML = `
+    getMain().innerHTML = `
         <div class="two-col">
             <div class="panel">
                 <h3>Create / Edit Event</h3>
@@ -604,8 +1011,41 @@ function renderEventsTab(events) {
                     </small>
                 </div>
                 <div class="field"><label>Description</label><textarea id="evDesc" placeholder="Describe the event..."></textarea></div>
+
+                <!-- Privacy toggle -->
+                <div class="field" style="margin-top:4px;">
+                    <label>Event Visibility</label>
+                    <div style="display:flex;gap:12px;margin-top:6px;">
+                        <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:13.5px;">
+                            <input type="radio" name="evPrivacy" id="evPublic" value="public" checked
+                                style="accent-color:var(--primary);width:15px;height:15px;" />
+                            🌐 Public <small style="color:var(--muted);margin-left:2px;">— anyone can register</small>
+                        </label>
+                        <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:13.5px;">
+                            <input type="radio" name="evPrivacy" id="evPrivate" value="private"
+                                style="accent-color:var(--primary);width:15px;height:15px;" />
+                            🔒 Private <small style="color:var(--muted);margin-left:2px;">— invite only</small>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Invite emails — shown only when Private is selected -->
+                <div class="field" id="evInviteField" style="display:none;margin-top:2px;">
+                    <label>Invite Attendees
+                        <small style="color:var(--muted);font-weight:normal;margin-left:6px;">
+                            — enter email addresses, one per line
+                        </small>
+                    </label>
+                    <textarea id="evInviteEmails" rows="4"
+                        placeholder="alice@festival.edu&#10;bob@festival.edu&#10;carol@festival.edu"
+                        style="font-size:12.5px;resize:vertical;"></textarea>
+                    <small style="color:var(--muted);font-size:11.5px;margin-top:4px;display:block;">
+                        ✅ Invited attendees are automatically approved. Emails not found in the system will be listed after saving.
+                    </small>
+                </div>
+
                 <div style="display:flex;gap:10px;margin-top:12px;">
-                    <button class="btn primary" id="evSaveBtn" type="button">Save Event</button>
+                    <button class="btn primary" id="evSaveBtn" type="button">Create Event</button>
                     <button class="btn" id="evValidateBtn" type="button">Validate</button>
                 </div>
             </div>
@@ -632,6 +1072,16 @@ function renderEventsTab(events) {
         el("evSaveBtn")    ?.addEventListener("click", saveEvent);
         el("evValidateBtn")?.addEventListener("click", validateEvent);
         el("evCapacity")   ?.addEventListener("input", () => setCapacityError(isCapacityInvalid()));
+
+        // Show/hide invite field based on privacy selection
+        document.querySelectorAll('input[name="evPrivacy"]').forEach(radio => {
+            radio.addEventListener("change", () => {
+                const inviteField = el("evInviteField");
+                if (inviteField) {
+                    inviteField.style.display = el("evPrivate")?.checked ? "block" : "none";
+                }
+            });
+        });
     }, 100);
 }
 
@@ -690,11 +1140,50 @@ async function saveEvent() {
     if (!name || !venueId || !eventDate || !startTime || !endTime || !capacity) { showToast("Error", "Please fill all required fields."); return; }
     if (isCapacityInvalid()) { setCapacityError(true); el("evCapacity")?.focus(); showToast("Error", "Number of attendees cannot exceed 300."); return; }
     if (startTime >= endTime) { showToast("Error", "End time must be after start time."); return; }
-    const payload = { title: name, description: desc, capacity, venueId: parseInt(venueId), eventDate, startTime, endTime };
+
+    // Read privacy setting and invite emails
+    const isPrivate    = el("evPrivate")?.checked ? true : false;
+    const inviteRaw    = el("evInviteEmails")?.value || "";
+    const inviteEmails = isPrivate
+        ? inviteRaw.split("\n").map(e => e.trim()).filter(e => e.length > 0)
+        : [];
+
+    // Validate: private event must have at least one invite
+    if (isPrivate && inviteEmails.length === 0) {
+        showToast("Error", "Please add at least one email address for a private event.");
+        el("evInviteEmails")?.focus();
+        return;
+    }
+
+    const payload = {
+        title: name, description: desc, capacity,
+        venueId: parseInt(venueId), eventDate, startTime, endTime,
+        isPrivate, inviteEmails
+    };
     if (state.editingEventId) payload.eventID = state.editingEventId;
-    const result = await fetchJSON("api/save-event.php", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-    if (result.success) { showToast("Success", "Event saved successfully!"); state.editingEventId = null; loadEventsTab(); }
-    else showToast("Error", result.error || "Failed to save event.");
+
+    const result = await fetchJSON("api/save-event.php", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    });
+
+    if (result.success) {
+        // Show warning if some invited emails weren't found in the system
+        if (result.warning) {
+            showToast("Event Created ⚠️", result.warning);
+        } else {
+            const msg = isPrivate ? "Private event created & invites sent! ✉️" : "Event saved successfully!";
+            showToast("Success 🎉", msg);
+        }
+        state.editingEventId = null;
+        // Reset privacy toggle back to Public after save
+        if (el("evPublic")) el("evPublic").checked = true;
+        if (el("evInviteField")) el("evInviteField").style.display = "none";
+        if (el("evInviteEmails")) el("evInviteEmails").value = "";
+        loadEventsTab();
+    } else {
+        showToast("Error", result.error || "Failed to save event.");
+    }
 }
 
 function validateEvent() {
@@ -716,7 +1205,7 @@ function validateEvent() {
 
 // ==================== SCHEDULE TAB ====================
 function loadScheduleTab() {
-    mainContent.innerHTML = `
+    getMain().innerHTML = `
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;">
             <div class="panel">
                 <h3>Availability Finder</h3>
@@ -813,7 +1302,7 @@ async function searchAvailability() {
 function loadResourcesTab() { renderResourcesTab(); }
 
 async function renderResourcesTab() {
-    mainContent.innerHTML = `
+    getMain().innerHTML = `
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;">
             <div class="panel">
                 <h3>Assign Resource to Event</h3>
@@ -866,10 +1355,11 @@ async function renderResourcesTab() {
                         <th>Type</th>
                         <th>Quantity</th>
                         <th>Event Status</th>
+                        <th>Action</th>
                     </tr>
                 </thead>
                 <tbody id="requestsBody">
-                    <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:16px;">Loading...</td></tr>
+                    <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:16px;">Loading...</td></tr>
                 </tbody>
             </table>
         </div>`;
@@ -879,7 +1369,7 @@ async function renderResourcesTab() {
     if (!data.success) {
         showToast("Error", data.error || "Failed to load resource data.");
         el("inventoryBody").innerHTML = `<tr><td colspan="5" style="color:#fb7185;text-align:center;padding:16px;">${data.error || "Error loading resources."}</td></tr>`;
-        el("requestsBody").innerHTML  = `<tr><td colspan="7" style="color:#fb7185;text-align:center;padding:16px;">Could not load assignments.</td></tr>`;
+        el("requestsBody").innerHTML  = `<tr><td colspan="8" style="color:#fb7185;text-align:center;padding:16px;">Could not load assignments.</td></tr>`;
         return;
     }
 
@@ -932,13 +1422,15 @@ async function renderResourcesTab() {
     if (reqBody) {
         const reqs = data.requests || [];
         if (reqs.length === 0) {
-            reqBody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:16px;">No resource assignments found.</td></tr>`;
+            reqBody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:16px;">No resource assignments found.</td></tr>`;
         } else {
             reqBody.innerHTML = reqs.map(r => {
-                const evCls = r.EventStatus === "CONFIRMED" ? "ok"
-                            : r.EventStatus === "DRAFT"     ? "warn"
-                            : "danger";
-                return `<tr>
+                const evCls     = r.EventStatus === "CONFIRMED" ? "ok"
+                                : r.EventStatus === "DRAFT"     ? "warn"
+                                : "danger";
+                const safeEvent = (r.EventName    || "").replace(/'/g, "");
+                const safeRes   = (r.ResourceName || "").replace(/'/g, "");
+                return `<tr id="res-row-${r.EventID}-${r.ResourceID}">
                     <td><b>${r.EventName || "—"}</b></td>
                     <td>${r.VenueName   || "—"}</td>
                     <td>
@@ -954,6 +1446,14 @@ async function renderResourcesTab() {
                     </td>
                     <td><b>${r.Quantity || 0}</b></td>
                     <td><span class="badge ${evCls}">${r.EventStatus || "—"}</span></td>
+                    <td>
+                        <button
+                            class="btn small danger"
+                            onclick="removeResourceAssignment(${r.EventID}, ${r.ResourceID}, '${safeEvent}', '${safeRes}')"
+                            style="font-size:11.5px;padding:4px 10px;">
+                            ✕ Remove
+                        </button>
+                    </td>
                 </tr>`;
             }).join("");
         }
@@ -988,11 +1488,45 @@ async function submitResourceRequest() {
     }
 }
 
+// Remove a resource assignment from an event
+window.removeResourceAssignment = async function(eventID, resourceID, eventName, resourceName) {
+    if (!confirm(`Remove "${resourceName}" from "${eventName}"?\nThis cannot be undone.`)) return;
+
+    // Fade the row immediately
+    const row = document.getElementById(`res-row-${eventID}-${resourceID}`);
+    if (row) {
+        row.style.opacity = "0.3";
+        row.querySelectorAll("button").forEach(b => b.disabled = true);
+    }
+
+    const result = await fetchJSON("api/remove-resource.php", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ eventID, resourceID })
+    });
+
+    if (result.success) {
+        showToast("Removed", `"${resourceName}" removed from "${eventName}".`);
+        // Full refresh of resources tab so inventory counts update too
+        renderResourcesTab();
+    } else {
+        showToast("Error", result.error || "Could not remove resource.");
+        if (row) {
+            row.style.opacity = "1";
+            row.querySelectorAll("button").forEach(b => b.disabled = false);
+        }
+    }
+};
+
 // ==================== ATTENDEES TAB ====================
-function loadAttendeesTab() { renderAttendeesTab(); }
+function loadAttendeesTab() {
+    renderAttendeesTab();
+    // Always fetch fresh data when switching to Attendees tab
+    // so any booking changes made elsewhere are immediately visible
+}
 
 async function renderAttendeesTab(search = "", eventId = "", status = "") {
-    mainContent.innerHTML = `
+    getMain().innerHTML = `
         <div style="display:grid;grid-template-columns:1fr 2fr;gap:24px;">
             <div class="panel">
                 <h3>Controls</h3>
@@ -1046,13 +1580,21 @@ async function renderAttendeesTab(search = "", eventId = "", status = "") {
             const bookCls = b.BookingStatus === "APPROVED"  ? "ok"
                           : b.BookingStatus === "PENDING"   ? "warn"
                           : "danger";
-            return `<tr>
-                <td><b>${b.AttendeeName || "—"}</b><br><small>${b.AttendeeEmail || ""}</small></td>
+            const safeName  = (b.AttendeeName || "").replace(/'/g, "");
+            const safeEvent = (b.EventName    || "").replace(/'/g, "");
+            const canRemove = b.BookingStatus !== "CANCELLED";
+            return `<tr data-att-row="${b.BookingID}" style="transition:opacity .3s;">
+                <td><b>${b.AttendeeName || "—"}</b><br><small style="color:var(--muted);">${b.AttendeeEmail || ""}</small></td>
                 <td>${b.EventName || "—"}</td>
                 <td>${b.EventDate || "—"}</td>
                 <td><span class="badge ${cls}">${b.TotalRegistered} / ${b.CapacityLimit}</span></td>
                 <td><span class="badge ${bookCls}">${b.BookingStatus || "—"}</span></td>
-                <td><button class="btn small danger" onclick="removeBooking(${b.BookingID})">Remove</button></td>
+                <td>${canRemove
+                    ? `<button class="btn small danger"
+                        onclick="removeBooking(${b.BookingID}, '${safeName}', '${safeEvent}')">
+                        ✕ Remove</button>`
+                    : `<span style="color:var(--muted);font-size:12px;">Cancelled</span>`}
+                </td>
             </tr>`;
         }).join("");
     }
@@ -1064,9 +1606,62 @@ async function renderAttendeesTab(search = "", eventId = "", status = "") {
     }, 100);
 }
 
-window.removeBooking = async function(bookingID) {
-    if (!confirm(`Remove booking #${bookingID}?`)) return;
-    showToast("Removed", `Booking #${bookingID} removed.`);
+window.removeBooking = async function(bookingID, attendeeName, eventName) {
+    if (!confirm(`Remove ${attendeeName} from "${eventName}"?\nTheir booking will be cancelled.`)) return;
+
+    // Capture filter values NOW before any DOM changes
+    const currentSearch  = el("attSearch")?.value.trim()  || "";
+    const currentEventId = el("attEventSel")?.value        || "";
+    const currentStatus  = el("attStatus")?.value          || "";
+
+    // Fade the row immediately so user sees instant feedback
+    const row = document.querySelector(`[data-att-row="${bookingID}"]`);
+    if (row) {
+        row.style.transition = "opacity 0.2s, height 0.3s";
+        row.style.opacity    = "0.3";
+        row.querySelectorAll("button").forEach(b => b.disabled = true);
+    }
+
+    const result = await fetchJSON("api/remove-guest.php", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ bookingID })
+    });
+
+    if (result.success) {
+        showToast("Removed ✅", `${attendeeName} has been removed from "${eventName}".`);
+
+        // Remove the row from the DOM immediately — no waiting, no flicker
+        if (row) {
+            row.style.opacity = "0";
+            setTimeout(() => row.remove(), 250);
+        }
+
+        // Check if the table is now empty and show empty state
+        setTimeout(() => {
+            const tbody = el("attendeesBody");
+            if (tbody && tbody.querySelectorAll("tr").length === 0) {
+                tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:16px;">No registrations found.</td></tr>`;
+            }
+        }, 300);
+
+        // Silently refresh capacity counts in background
+        Promise.all([fetchJSON("api/events-list.php"), fetchJSON("api/kpi-stats.php")])
+            .then(([evData]) => {
+                if (evData.success && evData.events) {
+                    dashboardEvents = evData.events;
+                    allEventsCache  = evData.events;
+                }
+            });
+
+    } else {
+        showToast("Error", result.error || "Could not remove attendee.");
+        // Restore row if the API call failed
+        if (row) {
+            row.style.opacity = "1";
+            row.querySelectorAll("button").forEach(b => b.disabled = false);
+        }
+    }
 };
 
 // ==================== REPORTS TAB ====================
@@ -1076,7 +1671,7 @@ async function renderReportsTab(startDate = "", endDate = "", venueId = "") {
     if (!startDate) startDate = new Date().toISOString().slice(0, 8) + "01";
     if (!endDate)   { const d = new Date(); d.setMonth(d.getMonth() + 1); d.setDate(0); endDate = d.toISOString().split("T")[0]; }
 
-    mainContent.innerHTML = `
+    getMain().innerHTML = `
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;">
             <div class="panel">
                 <h3>Report Filters</h3>
@@ -1085,7 +1680,7 @@ async function renderReportsTab(startDate = "", endDate = "", venueId = "") {
                 <div class="field"><label>Venue</label><select id="repVenue"><option value="">All Venues</option></select></div>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:15px;">
                     <button class="btn primary" id="repGenerateBtn">Generate Report</button>
-                    <button class="btn" id="repExportBtn">Export CSV</button>
+                    <button class="btn" id="repExportBtn">⬇ Export Excel</button>
                 </div>
             </div>
             <div class="panel">
@@ -1104,11 +1699,11 @@ async function renderReportsTab(startDate = "", endDate = "", venueId = "") {
                 </table>
             </div>
             <div class="panel">
-                <h3>Conflict Log</h3>
-                <table class="table" style="margin-top:15px;">
-                    <thead><tr><th>Event 1</th><th>Event 2</th><th>Venue</th><th>Date</th></tr></thead>
-                    <tbody id="repConflictBody"><tr><td colspan="4" style="text-align:center;color:var(--muted);padding:16px;">Generate report to load.</td></tr></tbody>
-                </table>
+                <h3>🔔 Recent Activity Feed</h3>
+                <p style="color:var(--muted);font-size:13px;margin-bottom:12px;">Latest actions across all events and registrations.</p>
+                <div id="activityFeedBody" style="max-height:320px;overflow-y:auto;">
+                    <div style="color:var(--muted);font-size:13px;padding:12px 0;text-align:center;">Loading activity...</div>
+                </div>
             </div>
         </div>
         <div class="panel" style="margin-top:24px;">
@@ -1129,9 +1724,60 @@ async function renderReportsTab(startDate = "", endDate = "", venueId = "") {
 
     setTimeout(() => {
         el("repGenerateBtn")?.addEventListener("click", generateReport);
-        el("repExportBtn")  ?.addEventListener("click", exportCSV);
-        generateReport(); // auto-load on open
+        el("repExportBtn")  ?.addEventListener("click", exportExcel);
+        generateReport();   // auto-load report on open
+        loadActivityFeed(); // auto-load activity feed on open
     }, 100);
+}
+
+async function loadActivityFeed() {
+    const panel = document.getElementById("activityFeedBody");
+    if (!panel) return;
+
+    const data = await fetchJSON("api/activity-feed.php");
+    if (!data.success || !data.activities || data.activities.length === 0) {
+        panel.innerHTML = `<div style="color:var(--muted);font-size:13px;padding:12px 0;text-align:center;">
+            No recent activity to show.
+        </div>`;
+        return;
+    }
+
+    panel.innerHTML = data.activities.map((act, i) => {
+        const isLast = i === data.activities.length - 1;
+        return `<div style="
+            display:flex;
+            align-items:flex-start;
+            gap:12px;
+            padding:10px 0;
+            ${!isLast ? "border-bottom:1px solid var(--glass-border);" : ""}
+        ">
+            <!-- Icon -->
+            <div style="
+                font-size:18px;
+                flex-shrink:0;
+                width:32px;
+                height:32px;
+                display:flex;
+                align-items:center;
+                justify-content:center;
+                background:var(--glass);
+                border-radius:50%;
+            ">${act.Icon}</div>
+
+            <!-- Text -->
+            <div style="flex:1;min-width:0;">
+                <div style="font-size:13px;color:var(--white);line-height:1.4;">
+                    ${act.Description}
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+                    <span class="badge ${act.BadgeClass}" style="font-size:10.5px;padding:2px 7px;">
+                        ${act.BookingStatus}
+                    </span>
+                    <span style="font-size:11px;color:var(--muted);">${act.TimeAgo}</span>
+                </div>
+            </div>
+        </div>`;
+    }).join("");
 }
 
 async function generateReport() {
@@ -1158,14 +1804,8 @@ async function generateReport() {
             <td><span class="badge ${v.UtilStatus}">${v.UtilStatus === "danger" ? "High" : v.UtilStatus === "warn" ? "Medium" : "Low"}</span></td>
         </tr>`).join("");
 
-    const cBody = el("repConflictBody");
-    if (cBody) cBody.innerHTML = (data.conflicts || []).length === 0
-        ? `<tr><td colspan="4" style="text-align:center;color:#34d399;padding:16px;">✅ No conflicts in this period.</td></tr>`
-        : data.conflicts.map(c => `<tr>
-            <td>${c.Event1}<br><small>${c.Slot1}</small></td>
-            <td>${c.Event2}<br><small>${c.Slot2}</small></td>
-            <td>${c.VenueName}</td><td>${c.EventDate}</td>
-        </tr>`).join("");
+    // Load recent activity feed alongside the report
+    loadActivityFeed();
 
     const capBody = el("repCapBody");
     if (capBody) capBody.innerHTML = (data.capacity || []).length === 0
@@ -1179,13 +1819,13 @@ async function generateReport() {
     showToast("Report Ready", `Showing data from ${startDate} to ${endDate}.`);
 }
 
-function exportCSV() {
+function exportExcel() {
     const startDate = el("repStart")?.value || "", endDate = el("repEnd")?.value || "", venueId = el("repVenue")?.value || "";
     if (!startDate || !endDate) { showToast("Error", "Select dates before exporting."); return; }
     const params = new URLSearchParams({ startDate, endDate });
     if (venueId) params.append("venueId", venueId);
     window.location.href = `api/export.php?${params}`;
-    showToast("Exporting", "Your CSV download will start shortly.");
+    showToast("Exporting ⬇", "Your Excel file will download shortly.");
 }
 
 // ==================== MAIN RENDER ====================
@@ -1204,12 +1844,36 @@ function renderMain() {
     if (state.tab === "resources") { loadResourcesTab();  return; }
     if (state.tab === "attendees") { loadAttendeesTab();  return; }
     if (state.tab === "reports")   { loadReportsTab();    return; }
-    mainContent.innerHTML = `<div class="panel"><h3>${state.tab}</h3><p>Coming soon...</p></div>`;
+    getMain().innerHTML = `<div class="panel"><h3>${state.tab}</h3><p>Coming soon...</p></div>`;
+}
+
+// ==================== THEME TOGGLE ====================
+function initTheme() {
+    const saved = localStorage.getItem('ch-theme') || 'light';
+    applyTheme(saved, false);
+}
+
+function applyTheme(theme, animate = true) {
+    if (!animate) document.body.style.transition = 'none';
+    document.body.classList.toggle('dark', theme === 'dark');
+    if (!animate) setTimeout(() => document.body.style.transition = '', 50);
+
+    localStorage.setItem('ch-theme', theme);
+
+    const icon = document.getElementById('themeIcon');
+    if (icon) icon.textContent = theme === 'dark' ? '🌙' : '☀️';
+}
+
+function toggleTheme() {
+    const isDark = document.body.classList.contains('dark');
+    applyTheme(isDark ? 'light' : 'dark');
 }
 
 // ==================== INIT ====================
 function init() {
+    initTheme();
     setHeaderForRole();
+    document.getElementById("themeToggleBtn")?.addEventListener("click", toggleTheme);
     document.querySelectorAll(".tab").forEach(t => { t.addEventListener("click", () => setActiveTab(t.dataset.tab)); });
     document.querySelectorAll(".chip").forEach(chip => {
         chip.addEventListener("click", () => {

@@ -2,7 +2,9 @@
 // api/delete-event.php - Delete event with ownership enforcement
 header('Content-Type: application/json');
 require_once '../config/db.php';
-session_start();
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 
 try {
     $input       = json_decode(file_get_contents('php://input'), true);

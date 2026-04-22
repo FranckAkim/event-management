@@ -2,9 +2,17 @@
 // api/register-event.php
 // booking schema: BookingID, UserID, VenueID, EventID, Status, RequestedAt, DepositAmount, Notes
 // Status constraint: 'PENDING','APPROVED','REJECTED','CANCELLED'
+//
+// TRIGGER INTEGRATION:
+//   Trigger 1 (trg_booking_before_insert)  — DB auto-sets RequestedAt, so we no longer pass NOW()
+//   Trigger 2 (trg_booking_check_capacity) — DB enforces capacity limit; we catch the SQLSTATE 45000
+//                                             error and return a friendly message instead of crashing
+
 header('Content-Type: application/json');
 require_once '../config/db.php';
-session_start();
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 
 try {
     $input   = json_decode(file_get_contents('php://input'), true);
@@ -18,16 +26,23 @@ try {
     }
 
     // ── Fetch event + venue ───────────────────────────────────────────────
+    // Count only PENDING and APPROVED bookings — matches Trigger 2's logic exactly
     $eventStmt = $pdo->prepare("
         SELECT
-            e.EventID, e.Title, e.CapacityLimit, e.Status,
-            COUNT(b.BookingID) AS Registered,
-            es.VenueID
+            e.EventID,
+            e.Title,
+            e.CapacityLimit,
+            e.Status,
+            es.VenueID,
+            (SELECT COUNT(*)
+             FROM booking bx
+             WHERE bx.EventID = e.EventID
+               AND bx.Status IN ('PENDING','APPROVED')
+            ) AS Registered
         FROM event e
-        LEFT JOIN booking b         ON e.EventID = b.EventID
         LEFT JOIN event_schedule es ON e.EventID = es.EventID
         WHERE e.EventID = ?
-        GROUP BY e.EventID, e.Title, e.CapacityLimit, e.Status, es.VenueID
+        LIMIT 1
     ");
     $eventStmt->execute([$eventID]);
     $event = $eventStmt->fetch(PDO::FETCH_ASSOC);
@@ -89,18 +104,38 @@ try {
         exit;
     }
 
-    // Check capacity
+    // ── PHP-level capacity pre-check (fast fail before hitting the DB trigger) ──
+    // Trigger 2 enforces this at DB level too — this just gives a nicer early message
     if ((int)$event['Registered'] >= (int)$event['CapacityLimit']) {
-        echo json_encode(['success' => false, 'error' => "Sorry, \"{$event['Title']}\" is fully booked."]);
+        echo json_encode([
+            'success' => false,
+            'error'   => "Sorry, \"{$event['Title']}\" is fully booked."
+        ]);
         exit;
     }
 
-    // ── INSERT new booking ─────────────────────────────────────────────────
-    // Status starts as 'PENDING' — admin/organiser approves
-    $pdo->prepare("
-        INSERT INTO booking (UserID, VenueID, EventID, Status, RequestedAt, DepositAmount, Notes)
-        VALUES (?, ?, ?, 'PENDING', NOW(), 0, '')
-    ")->execute([$userID, $venueID, $eventID]);
+    // ── INSERT new booking ────────────────────────────────────────────────
+    // NOTE: RequestedAt is intentionally omitted — Trigger 1 sets it automatically in the DB.
+    // NOTE: If Trigger 2 fires (capacity exceeded), it raises SQLSTATE 45000 — caught below.
+    try {
+        $pdo->prepare("
+            INSERT INTO booking (UserID, VenueID, EventID, Status, DepositAmount, Notes)
+            VALUES (?, ?, ?, 'PENDING', 0, '')
+        ")->execute([$userID, $venueID, $eventID]);
+    } catch (PDOException $triggerError) {
+        // Trigger 2 raises SQLSTATE 45000 with our custom message
+        if ($triggerError->getCode() === '45000') {
+            echo json_encode([
+                'success' => false,
+                'error'   => "Sorry, \"{$event['Title']}\" is fully booked. " .
+                    "The capacity limit was reached just now."
+            ]);
+        } else {
+            // Some other DB error — re-throw so the outer catch handles it
+            throw $triggerError;
+        }
+        exit;
+    }
 
     $spotsLeft = (int)$event['CapacityLimit'] - (int)$event['Registered'] - 1;
     $msg = "Registration submitted for \"{$event['Title']}\"! Awaiting approval.";

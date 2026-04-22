@@ -22,13 +22,23 @@ $canManage = $isAdmin;  // only admin sees Reports, Attendees
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Event Scheduling System - Dashboard</title>
+    <title>CelebrateHub — Dashboard</title>
     <link rel="stylesheet" href="assets/css/styles.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <script>
         window.currentUserRole = "<?= htmlspecialchars($role) ?>";
         window.currentUserID = <?= (int)($_SESSION['user_id'] ?? 0) ?>;
         window.canCreateEvent = <?= $canCreate ? 'true' : 'false' ?>;
         window.canManage = <?= $canManage ? 'true' : 'false' ?>;
+    </script>
+    <script>
+        // Apply saved theme before page renders to prevent flash
+        (function() {
+            if (localStorage.getItem('ch-theme') === 'dark') {
+                document.documentElement.classList.add('dark-pending');
+            }
+        })();
     </script>
 </head>
 
@@ -36,14 +46,18 @@ $canManage = $isAdmin;  // only admin sees Reports, Attendees
     <div class="topbar">
         <div class="topbar-inner">
             <div class="brand">
-                <div class="logo" aria-hidden="true"></div>
-                <div>
-                    <h1>Event Scheduling System</h1>
-                    <p>Weddings & Birthdays • Centralized Scheduling</p>
-                </div>
+                <img src="assets/images/logo.svg" alt="CelebrateHub" width="38" height="38"
+                    style="border-radius:50%;box-shadow:0 4px 14px rgba(255,107,157,.35);" />
+                <div class="brand-name">Celebrate<span style="font-style:italic;font-weight:300;color:var(--peach);">Hub</span></div>
             </div>
             <div class="top-actions">
                 <span class="pill">Mode: <b id="rolePill"><?= ucfirst($role) ?></b></span>
+                <button class="theme-toggle" id="themeToggleBtn" type="button" title="Toggle dark / light mode" aria-label="Toggle theme">
+                    <span id="themeIcon">☀️</span>
+                    <div class="toggle-track">
+                        <div class="toggle-thumb"></div>
+                    </div>
+                </button>
                 <button class="btn small" id="helpBtn" type="button">Tips</button>
                 <a href="logout.php" class="btn danger small">Logout</a>
             </div>
@@ -57,10 +71,14 @@ $canManage = $isAdmin;  // only admin sees Reports, Attendees
             <section class="card" id="authCard">
                 <div class="hd">
                     <div>
-                        <h2>Logged In As</h2>
+                        <h2>Welcome</h2>
                         <p id="userName"><?= htmlspecialchars($_SESSION['user_name'] ?? 'User') ?></p>
                     </div>
-                    <span class="badge ok">DB Connected</span>
+                    <span class="badge ok" id="sidebarBadge">
+                        <?php if ($isAdmin): ?>DB Connected<?php
+                                                        elseif ($isOrg): ?>Loading...<?php
+                                                                                    else: ?>Loading...<?php endif; ?>
+                    </span>
                 </div>
                 <div class="bd">
                     <div class="stack">

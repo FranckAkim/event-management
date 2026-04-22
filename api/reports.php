@@ -96,33 +96,6 @@ try {
     $capAnalysis->execute($capParams);
     $capacityData = $capAnalysis->fetchAll(PDO::FETCH_ASSOC);
 
-    // Conflict log — same venue, same date, overlapping times
-    $conflictLog = $pdo->prepare("
-        SELECT
-            e1.Title  AS Event1,
-            e2.Title  AS Event2,
-            v.Name    AS VenueName,
-            t1.EventDate,
-            CONCAT(t1.StartTime, '–', t1.EndTime) AS Slot1,
-            CONCAT(t2.StartTime, '–', t2.EndTime) AS Slot2
-        FROM event_schedule es1
-        JOIN event_schedule es2 ON es1.VenueID = es2.VenueID AND es1.EventID < es2.EventID
-        JOIN timeslot t1 ON es1.SlotID = t1.SlotID
-        JOIN timeslot t2 ON es2.SlotID = t2.SlotID
-        JOIN event e1    ON es1.EventID = e1.EventID
-        JOIN event e2    ON es2.EventID = e2.EventID
-        JOIN venue v     ON es1.VenueID = v.VenueID
-        WHERE t1.EventDate = t2.EventDate
-          AND t1.StartTime < t2.EndTime
-          AND t1.EndTime   > t2.StartTime
-          AND t1.EventDate BETWEEN ? AND ?
-          AND e1.Status != 'CANCELLED'
-          AND e2.Status != 'CANCELLED'
-        ORDER BY t1.EventDate ASC
-    ");
-    $conflictLog->execute([$startDate, $endDate]);
-    $conflicts = $conflictLog->fetchAll(PDO::FETCH_ASSOC);
-
     // All venues for filter dropdown
     $venues = $pdo->query("
         SELECT VenueID, Name AS VenueName FROM venue WHERE IsActive = TRUE ORDER BY Name ASC
@@ -133,7 +106,6 @@ try {
         'summary'      => $summaryData,
         'venueUtil'    => $venueData,
         'capacity'     => $capacityData,
-        'conflicts'    => $conflicts,
         'venues'       => $venues
     ]);
 } catch (Exception $e) {

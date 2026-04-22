@@ -1,11 +1,18 @@
 <?php
 // api/kpi-stats.php - Role-aware dashboard KPI numbers
-// admin    → system-wide stats
-// organiser → their own events only
-// requester → their registrations only
+//
+// TRIGGER INTEGRATION:
+//   Trigger 2 (trg_booking_check_capacity) — all COUNT(booking) capacity checks now filter
+//             Status IN ('PENDING','APPROVED') to match exactly what the trigger enforces.
+//             Previously counting ALL bookings could inflate numbers with CANCELLED/REJECTED rows.
+//   Trigger 3 (trg_venue_deactivated)      — auto-cancelled events excluded via Status != 'CANCELLED'
+//             which was already in place; no extra changes needed for this trigger.
+
 header('Content-Type: application/json');
 require_once '../config/db.php';
-session_start();
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 
 try {
     $role   = strtolower($_SESSION['role']   ?? 'requester');
@@ -18,11 +25,11 @@ try {
             SELECT COUNT(*) FROM event WHERE Status = 'CONFIRMED'
         ")->fetchColumn();
 
-        // Open days next 7 days (days with no events)
+        // Open days next 7 days (days that have no CONFIRMED events)
         $bookedDates = $pdo->query("
             SELECT DISTINCT t.EventDate
             FROM timeslot t
-            JOIN event_schedule es ON t.SlotID  = es.SlotID
+            JOIN event_schedule es ON t.SlotID   = es.SlotID
             JOIN event e           ON es.EventID = e.EventID
             WHERE t.EventDate BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)
               AND e.Status != 'CANCELLED'
@@ -33,18 +40,22 @@ try {
             if (!in_array(date('Y-m-d', strtotime("+$i days")), $bookedDates)) $openDays++;
         }
 
+        // Near-capacity: count only PENDING+APPROVED bookings — matches Trigger 2
         $capacityAlerts = $pdo->query("
             SELECT COUNT(*) FROM (
                 SELECT e.EventID
                 FROM event e
-                LEFT JOIN booking b ON e.EventID = b.EventID
                 WHERE e.Status != 'CANCELLED'
                 GROUP BY e.EventID, e.CapacityLimit
-                HAVING COUNT(b.BookingID) >= e.CapacityLimit * 0.85
+                HAVING (
+                    SELECT COUNT(*) FROM booking b
+                    WHERE b.EventID = e.EventID
+                      AND b.Status IN ('PENDING','APPROVED')
+                ) >= e.CapacityLimit * 0.85
             ) AS alerts
         ")->fetchColumn();
 
-        // Pending resource requests (check if Status column exists)
+        // Pending resource requests
         try {
             $pendingRequests = $pdo->query("
                 SELECT COUNT(*) FROM event_resource WHERE Status = 'PENDING'
@@ -72,7 +83,7 @@ try {
         $myEvents->execute([$userID]);
         $activeEvents = $myEvents->fetchColumn();
 
-        // Upcoming events they're organising in next 7 days
+        // Upcoming events this week
         $upcomingStmt = $pdo->prepare("
             SELECT COUNT(DISTINCT e.EventID)
             FROM event e
@@ -85,26 +96,30 @@ try {
         $upcomingStmt->execute([$userID]);
         $upcomingCount = $upcomingStmt->fetchColumn();
 
-        // Near-capacity events they organise
+        // Near-capacity events — count PENDING+APPROVED only (Trigger 2 alignment)
         $capStmt = $pdo->prepare("
             SELECT COUNT(*) FROM (
                 SELECT e.EventID
                 FROM event e
-                LEFT JOIN booking b ON e.EventID = b.EventID
                 WHERE e.OrganizerID = ? AND e.Status != 'CANCELLED'
                 GROUP BY e.EventID, e.CapacityLimit
-                HAVING COUNT(b.BookingID) >= e.CapacityLimit * 0.85
+                HAVING (
+                    SELECT COUNT(*) FROM booking b
+                    WHERE b.EventID = e.EventID
+                      AND b.Status IN ('PENDING','APPROVED')
+                ) >= e.CapacityLimit * 0.85
             ) AS alerts
         ");
         $capStmt->execute([$userID]);
         $capacityAlerts = $capStmt->fetchColumn();
 
-        // Total bookings across their events
+        // Total active bookings on organiser's events (PENDING + APPROVED only)
         $bookingStmt = $pdo->prepare("
             SELECT COUNT(b.BookingID)
             FROM booking b
             JOIN event e ON b.EventID = e.EventID
             WHERE e.OrganizerID = ?
+              AND b.Status IN ('PENDING','APPROVED')
         ");
         $bookingStmt->execute([$userID]);
         $totalBookings = $bookingStmt->fetchColumn();
@@ -122,15 +137,18 @@ try {
             'label4'          => 'Total Registrations'
         ]);
     } else {
-        // ── REQUESTER/ATTENDEE: their registrations ───────────────────────
+        // ── REQUESTER/ATTENDEE ────────────────────────────────────────────
 
+        // Count only active (PENDING + APPROVED) bookings for this user
         $myBookings = $pdo->prepare("
-            SELECT COUNT(*) FROM booking WHERE UserID = ?
+            SELECT COUNT(*) FROM booking
+            WHERE UserID = ?
+              AND Status IN ('PENDING','APPROVED')
         ");
         $myBookings->execute([$userID]);
         $totalBookings = $myBookings->fetchColumn();
 
-        // Upcoming registered events
+        // Upcoming APPROVED events this user is registered for
         $upcomingStmt = $pdo->prepare("
             SELECT COUNT(DISTINCT b.EventID)
             FROM booking b
@@ -138,23 +156,24 @@ try {
             JOIN event_schedule es ON e.EventID  = es.EventID
             JOIN timeslot t        ON es.SlotID   = t.SlotID
             WHERE b.UserID = ?
+              AND b.Status = 'APPROVED'
               AND t.EventDate >= CURDATE()
               AND e.Status = 'CONFIRMED'
         ");
         $upcomingStmt->execute([$userID]);
         $upcomingEvents = $upcomingStmt->fetchColumn();
 
-        // Total confirmed events available to browse
+        // Total publicly available CONFIRMED events
         $allEvents = $pdo->query("
             SELECT COUNT(*) FROM event WHERE Status = 'CONFIRMED'
         ")->fetchColumn();
 
-        // Open days (venues available) next 7 days
+        // Open days next 7 days
         $bookedDates = $pdo->query("
             SELECT DISTINCT t.EventDate
             FROM timeslot t
-            JOIN event_schedule es ON t.SlotID = es.SlotID
-            JOIN event e ON es.EventID = e.EventID
+            JOIN event_schedule es ON t.SlotID   = es.SlotID
+            JOIN event e           ON es.EventID = e.EventID
             WHERE t.EventDate BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)
               AND e.Status = 'CONFIRMED'
         ")->fetchAll(PDO::FETCH_COLUMN);
@@ -173,7 +192,7 @@ try {
             'pendingRequests' => (int)$openDays,
             'label1'          => 'Available Events',
             'label2'          => 'My Upcoming Events',
-            'label3'          => 'My Registrations',
+            'label3'          => 'My Active Registrations',
             'label4'          => 'Open Days This Week'
         ]);
     }

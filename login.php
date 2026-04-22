@@ -1,152 +1,101 @@
 <?php
-// login.php - Updated with new branding
 session_start();
-require_once 'config/db.php';
+if (isset($_SESSION['user_id'])) {
+    header("Location: dashboard.php");
+    exit;
+}
 
-$error = "";
+$error = '';
 
-if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    $email = trim($_POST['email'] ?? '');
-    $password = $_POST['password'] ?? '';
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_once 'config/db.php';
+
+    $email    = trim($_POST['email']    ?? '');
+    $password = trim($_POST['password'] ?? '');
 
     if (empty($email) || empty($password)) {
-        $error = "Please enter both email and password.";
+        $error = 'Please enter both email and password.';
     } else {
-        $stmt = $pdo->prepare("
-            SELECT UserID, Name, Email, RoleName, password 
-            FROM user 
-            WHERE Email = ?
-        ");
+        $stmt = $pdo->prepare("SELECT UserID, Name, Email, RoleName, password FROM user WHERE Email = ? LIMIT 1");
         $stmt->execute([$email]);
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if ($user && $user['password'] === $password) {
-            // Login successful - store user name
             $_SESSION['user_id']   = $user['UserID'];
             $_SESSION['user_name'] = $user['Name'];
             $_SESSION['email']     = $user['Email'];
-            $_SESSION['role']      = $user['RoleName'];
-
+            $_SESSION['role']      = strtolower($user['RoleName']);
             header("Location: dashboard.php");
             exit;
         } else {
-            $error = "Invalid email or password.";
+            $error = 'Incorrect email or password. Please try again.';
         }
     }
 }
 ?>
-
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Event Scheduling System - Login</title>
+    <title>CelebrateHub — Sign In</title>
     <link rel="stylesheet" href="assets/css/styles.css" />
-    <style>
-        body {
-            background: var(--bg);
-            color: var(--text);
-            font-family: var(--font);
-            margin: 0;
-            padding: 0;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        .login-box {
-            max-width: 420px;
-            width: 100%;
-            background: var(--panel);
-            padding: 50px 40px;
-            border-radius: var(--radius2);
-            box-shadow: var(--shadow);
-            margin: 20px;
-        }
-
-        .logo-area {
-            text-align: center;
-            margin-bottom: 30px;
-        }
-
-        .btn {
-            width: 100%;
-            padding: 14px;
-            font-size: 16px;
-            margin-top: 10px;
-        }
-
-        .field {
-            margin-bottom: 20px;
-        }
-
-        .field label {
-            display: block;
-            margin-bottom: 8px;
-            color: var(--muted);
-        }
-
-        input {
-            width: 100%;
-            padding: 12px 14px;
-            background: var(--panel2);
-            border: 1px solid var(--line);
-            border-radius: 8px;
-            color: var(--text);
-            font-size: 15px;
-        }
-
-        .error {
-            color: #fb7185;
-            background: #fb718520;
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            text-align: center;
-        }
-    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <script>
+        (function() {
+            if (localStorage.getItem('ch-theme') === 'dark') {
+                document.body && document.body.classList.add('dark');
+            }
+            document.addEventListener('DOMContentLoaded', function() {
+                if (localStorage.getItem('ch-theme') === 'dark') {
+                    document.body.classList.add('dark');
+                }
+            });
+        })();
+    </script>
 </head>
 
 <body>
-    <div class="login-box">
-        <div class="logo-area">
-            <h1>Event Scheduling System</h1>
-            <p style="color:var(--muted); margin-top:8px;">Weddings & Birthdays • Centralized Scheduling</p>
-        </div>
+    <div class="auth-wrap">
+        <div class="auth-card">
 
-        <?php if ($error): ?>
-            <div class="error">
-                <?= htmlspecialchars($error) ?>
+            <div style="text-align:center;margin-bottom:16px;">
+                <img src="assets/images/logo.svg" alt="CelebrateHub" width="54" height="54"
+                    style="border-radius:50%;box-shadow:0 6px 20px rgba(255,107,157,.32);" />
             </div>
-        <?php endif; ?>
+            <div class="auth-logo">
+                Celebrate<span>Hub</span>
+            </div>
+            <p class="auth-sub">Weddings · Birthdays · Celebrations</p>
 
-        <form method="POST" action="">
-            <div class="field">
-                <label>Email Address</label>
-                <input type="email" name="email" required
-                    value="<?= htmlspecialchars($_POST['email'] ?? '') ?>"
-                    placeholder="admin@festivalsystem.com" />
+            <?php if ($error): ?>
+                <div class="auth-error show"><?= htmlspecialchars($error) ?></div>
+            <?php endif; ?>
+
+            <form method="POST" action="login.php">
+                <div class="field">
+                    <label>Email Address</label>
+                    <input type="email" name="email" placeholder="you@example.com"
+                        value="<?= htmlspecialchars($_POST['email'] ?? '') ?>"
+                        autocomplete="email" required />
+                </div>
+                <div class="field" style="margin-top:12px;">
+                    <label>Password</label>
+                    <input type="password" name="password" placeholder="••••••••"
+                        autocomplete="current-password" required />
+                </div>
+                <button type="submit" class="btn primary" style="margin-top:20px;width:100%;border-radius:12px;padding:12px;">
+                    Sign In
+                </button>
+            </form>
+
+            <div class="auth-footer">
+                Don't have an account?
+                <a href="register.php">Create one</a>
             </div>
 
-            <div class="field">
-                <label>Password</label>
-                <input type="password" name="password" required
-                    placeholder="Enter your password" />
-            </div>
-
-            <button type="submit" class="btn primary">Login</button>
-        </form>
-
-        <p style="text-align: center; margin-top: 25px; color: var(--muted);">
-            Don't have an account?
-            <a href="register.php" style="color: var(--accent);">Create New Account</a>
-        </p>
-
-        <div style="text-align: center; margin-top: 30px; font-size: 13px; color: var(--muted);">
-            Demo: admin@festivalsystem.com / admin123
         </div>
     </div>
 </body>
